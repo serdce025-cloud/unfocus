@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Стереокоридор Unfocus</title>
+<style>
+  /* One-screen static stereogram; settings in a self-hiding bottom sheet. Single deliberate dark look. */
+  :root {
+    --ink: #0b0b0e;
+    --sheet: rgba(18, 18, 24, .9);
+    --line: #34343f;
+    --text: #ececf1;
+    --muted: #a0a0ad;
+    --accent: #ffb37f;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--ink); color: var(--text); font: 14px/1.35 var(--font); }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; touch-action: none; }
+  #sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    max-height: 62vh; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--sheet); backdrop-filter: blur(8px); border-top: 1px solid var(--line); border-radius: 14px 14px 0 0;
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+    transition: transform .3s ease, opacity .3s ease;
+  }
+  #sheet.hidden { transform: translateY(105%); opacity: 0; pointer-events: none; }
+  @media (min-width: 700px) { #sheet { left: 12px; right: auto; bottom: 12px; width: 320px; border-radius: 12px; border: 1px solid var(--line); } }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  label { display: flex; justify-content: space-between; margin: 8px 0 2px; color: var(--muted); }
+  label b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; margin: 0; }
+  select, button { width: 100%; background: #26262f; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font: inherit; }
+  button { cursor: pointer; }
+  button.small { width: auto; padding: 6px 12px; }
+  .chk { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); }
+  .chk input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+  .ctl.focused label, .ctl.focused > span { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 8px; margin-top: 12px; } .row button { flex: 1; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+  #toast {
+    position: fixed; z-index: 6; left: 50%; transform: translateX(-50%);
+    top: calc(12px + env(safe-area-inset-top, 0px)); max-width: calc(100vw - 32px);
+    padding: 8px 12px; border-radius: 10px; background: var(--sheet); color: var(--text); text-align: center;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #toast.on { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { #sheet, #toast { transition: none; } }
+</style>
+
+<canvas id="c" aria-label="Стереограмма: коридор с рогатым монстром"></canvas>
+<div id="toast" role="status"></div>
+
+<div id="sheet" class="hidden">
+  <div class="head"><h1>Стереокоридор</h1><button id="close" class="small" type="button">Скрыть</button></div>
+  <div class="ctl"><label for="sep">Ширина узора, px <b id="v_sep"></b></label>
+    <input id="sep" type="range" min="60" max="300" step="1" value="226"></div>
+  <div class="ctl"><label for="depth">Сила глубины <b id="v_depth"></b></label>
+    <input id="depth" type="range" min="0.05" max="0.5" step="0.01" value="0.5"></div>
+  <div class="ctl"><label for="dot">Размер точки, px <b id="v_dot"></b></label>
+    <input id="dot" type="range" min="1" max="4" step="1" value="1"></div>
+  <div class="ctl"><label for="anchor">Старт узора</label>
+    <select id="anchor"><option value="left">Слева</option><option value="center">От центра</option></select></div>
+  <div class="ctl chk"><input id="symmetric" type="checkbox" checked><span>Симметричные пары</span></div>
+  <div class="ctl chk"><input id="showDepth" type="checkbox"><span>Показать ответ (карту глубины)</span></div>
+  <div class="row"><button id="reseed" type="button">Новый узор</button><button id="fit" type="button">Под этот экран</button></div>
+  <div class="row"><button id="fs" type="button">Во весь экран</button></div>
+  <p class="hint">Смотрите «сквозь» экран, будто вдаль, пока полосы не сольются. В глубине — коридор, рогатый монстр и стволы ружья у самых глаз. На телефоне лучше повернуть экран горизонтально.<br>
+  Касание — настройки. На компьютере: Tab — между настройками, стрелки — на один шаг.</p>
+</div>
+
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: true });
+
+const VS = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }`;
+
+// ---- pass 1: ray-cast the scene once, store depth (16 bit in R,G)
+const DEPTH_FS = `#version 300 es
+precision highp float;
+uniform vec2 uRes;
+uniform float uFocal;
+out vec4 o;
+const float NEAR = 0.45, FAR = 32.0, B = 1e6;
+const float FLOOR = -1.3, CEIL = 2.2, WALL = 2.4, END = 30.0;
+vec3 D; float T;
+void hitT(float t) { if (t > 0.0 && t < T) T = t; }
+void plane(int a, float v, vec3 lo, vec3 hi) {
+  float t = v / D[a];
+  vec3 p = D * t;
+  if (all(greaterThanEqual(p, lo)) && all(lessThanEqual(p, hi))) hitT(t);
+}
+void ellipsoid(vec3 c, vec3 r) {
+  vec3 oo = -c / r, u = D / r;
+  float a = dot(u, u), b = 2.0 * dot(oo, u), cc = dot(oo, oo) - 1.0;
+  float disc = b * b - 4.0 * a * cc;
+  if (disc >= 0.0) hitT((-b - sqrt(disc)) / (2.0 * a));
+}
+void cylY(float cx, float cz, float r, float y0, float y1) {
+  float a = D.x * D.x + D.z * D.z, b = -2.0 * (cx * D.x + cz * D.z), cc = cx * cx + cz * cz - r * r;
+  float disc = b * b - 4.0 * a * cc;
+  if (disc < 0.0) return;
+  float t = (-b - sqrt(disc)) / (2.0 * a), y = D.y * t;
+  if (y >= y0 && y <= y1) hitT(t);
+}
+void cylZ(float cx, float cy, float r, float z0, float z1) {
+  float a = D.x * D.x + D.y * D.y, b = -2.0 * (cx * D.x + cy * D.y), cc = cx * cx + cy * cy - r * r;
+  float disc = b * b - 4.0 * a * cc;
+  if (disc < 0.0) return;
+  float t = (-b - sqrt(disc)) / (2.0 * a), z = D.z * t;
+  if (z >= z0 && z <= z1) hitT(t);
+}
+void main() {
+  vec2 pix = vec2(gl_FragCoord.x - 0.5 * uRes.x, gl_FragCoord.y - 0.5 * uRes.y);
+  D = vec3(pix / uFocal, 1.0);
+  T = 1e9;
+  // corridor shell
+  plane(1, FLOOR, vec3(-WALL, -B, 0.0), vec3(WALL, B, END));
+  plane(1, CEIL,  vec3(-WALL, -B, 0.0), vec3(WALL, B, END));
+  plane(0, -WALL, vec3(-B, FLOOR, 0.0), vec3(B, CEIL, END));
+  plane(0,  WALL, vec3(-B, FLOOR, 0.0), vec3(B, CEIL, END));
+  plane(2, END, vec3(-B), vec3(B));
+  // recessed door + step
+  plane(2, END - 0.6, vec3(-2.4, FLOOR, -B), vec3(-0.9, CEIL, B));
+  plane(2, END - 0.6, vec3(0.9, FLOOR, -B), vec3(2.4, CEIL, B));
+  plane(2, END - 0.6, vec3(-0.9, 1.0, -B), vec3(0.9, CEIL, B));
+  plane(1, FLOOR + 0.25, vec3(-0.9, -B, END - 2.0), vec3(0.9, B, END));
+  // wall ribs every 3 m, ceiling beams every 4.5 m
+  for (int i = 1; i < 10; i++) {
+    float z = 3.0 * float(i);
+    plane(2, z, vec3(-WALL, FLOOR, -B), vec3(-WALL + 0.25, CEIL, B));
+    plane(2, z, vec3(WALL - 0.25, FLOOR, -B), vec3(WALL, CEIL, B));
+  }
+  for (int i = 1; i < 7; i++) plane(2, 4.5 * float(i), vec3(-WALL, CEIL - 0.35, -B), vec3(WALL, CEIL, B));
+  // pillars
+  for (int i = 1; i < 4; i++) { float z = 7.0 * float(i); cylY(-1.6, z, 0.28, FLOOR, CEIL); cylY(1.6, z, 0.28, FLOOR, CEIL); }
+  // crate
+  plane(2, 10.0, vec3(-2.4, FLOOR, -B), vec3(-1.7, FLOOR + 0.7, B));
+  plane(0, -1.7, vec3(-B, FLOOR, 10.0), vec3(B, FLOOR + 0.7, 10.7));
+  plane(1, FLOOR + 0.7, vec3(-2.4, -B, 10.0), vec3(-1.7, B, 10.7));
+  // original horned brute
+  float bx = 0.35, bz = 6.0;
+  ellipsoid(vec3(bx, -0.15, bz), vec3(0.75, 0.85, 0.55));
+  ellipsoid(vec3(bx, -1.05, bz), vec3(0.55, 0.3, 0.45));
+  ellipsoid(vec3(bx - 0.3, -1.25, bz - 0.1), vec3(0.22, 0.12, 0.3));
+  ellipsoid(vec3(bx + 0.3, -1.25, bz - 0.1), vec3(0.22, 0.12, 0.3));
+  ellipsoid(vec3(bx, 0.85, bz - 0.15), vec3(0.32, 0.3, 0.3));
+  ellipsoid(vec3(bx, 0.7, bz - 0.42), vec3(0.2, 0.12, 0.12));
+  for (int side = 0; side < 2; side++) {
+    float s = side == 0 ? -1.0 : 1.0;
+    for (int i = 0; i < 7; i++) {
+      float k = float(i) / 6.0;
+      ellipsoid(vec3(bx + s * (0.25 + 0.45 * k), 1.0 + 0.55 * k - 0.25 * k * k, bz - 0.05 + 0.25 * k), vec3(0.11 * (1.0 - 0.7 * k)));
+    }
+    ellipsoid(vec3(bx + s * 0.9, 0.35, bz - 0.1), vec3(0.3, 0.25, 0.3));
+    ellipsoid(vec3(bx + s * 1.1, -0.25, bz - 0.25), vec3(0.17, 0.5, 0.17));
+    ellipsoid(vec3(bx + s * 1.15, -0.85, bz - 0.45), vec3(0.15, 0.4, 0.15));
+    for (int c = -1; c <= 1; c++) ellipsoid(vec3(bx + s * 1.15 + float(c) * 0.08, -1.25, bz - 0.55), vec3(0.04, 0.16, 0.04));
+  }
+  // double-barrel gun
+  cylZ(-0.055, -0.42, 0.05, 0.55, 1.6);
+  cylZ( 0.055, -0.42, 0.05, 0.55, 1.6);
+  ellipsoid(vec3(0.0, -0.52, 0.62), vec3(0.16, 0.1, 0.32));
+  ellipsoid(vec3(0.0, -0.5, 0.95), vec3(0.12, 0.05, 0.25));
+
+  float z = min(T, FAR);
+  float d = clamp(1.0 - log(max(z, NEAR) / NEAR) / log(FAR / NEAR), 0.0, 1.0);
+  float q = floor(d * 65535.0 + 0.5);
+  o = vec4(floor(q / 256.0) / 255.0, mod(q, 256.0) / 255.0, 0.0, 1.0);
+}`;
+
+// ---- pass 2: stereogram from the stored depth (one row = one texture row)
+const STEREO_FS = `#version 300 es
+precision highp float; precision highp int;
+uniform sampler2D uDepth;
+uniform vec2 uRes;
+uniform float uPw, uMu, uDot;
+uniform uint uSeed;
+uniform int uAnchor, uSym, uShowDepth;
+out vec4 o;
+int row;
+float texDepth(int x) {
+  x = clamp(x, 0, int(uRes.x) - 1);
+  vec4 t = texelFetch(uDepth, ivec2(x, row), 0);
+  return (t.r * 255.0 * 256.0 + t.g * 255.0) / 65535.0;
+}
+float depthAt(float x) {
+  float fx = floor(x), f = x - fx;
+  return mix(texDepth(int(fx)), texDepth(int(fx) + 1), f);
+}
+float sepOf(float z) { float E = 2.0 * uPw; return E * (1.0 - uMu * z) / (2.0 - uMu * z); }
+float leftOf(float x) {
+  float L = x - sepOf(depthAt(x));
+  if (uSym == 1) for (int i = 0; i < 4; i++) L = x - sepOf(depthAt(0.5 * (x + L)));
+  return L;
+}
+float rightOf(float x) {
+  float R = x + sepOf(depthAt(x));
+  if (uSym == 1) for (int i = 0; i < 4; i++) R = x + sepOf(depthAt(0.5 * (x + R)));
+  return R;
+}
+uint hash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+vec3 dotColour(float u, float y) {
+  uint ix = uint(floor(u / uDot)), iy = uint(floor(y / uDot));
+  uint h = hash(ix * 1973u + hash(iy * 9277u + uSeed * 26699u));
+  return vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0;
+}
+void main() {
+  row = int(gl_FragCoord.y);
+  float x = gl_FragCoord.x - 0.5;
+  float y = uRes.y - gl_FragCoord.y - 0.5;
+  if (uShowDepth == 1) { o = vec4(vec3(depthAt(x)), 1.0); return; }
+  float A = uAnchor == 0 ? 0.0 : floor(0.5 * uRes.x - 0.5 * uPw);
+  for (int i = 0; i < 400; i++) {
+    if (x < A) { x = rightOf(x); continue; }
+    float L = leftOf(x);
+    if (L < A) break;
+    x = L;
+  }
+  o = vec4(dotColour(x - A, y), 1.0);
+}`;
+
+const toast = document.getElementById("toast");
+let toastTimer;
+function showToast(text, ms = 1300) {
+  toast.textContent = text; toast.classList.add("on");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove("on"), ms);
+}
+
+let depthProg, stereoProg, depthTex, fbo, Ud = {}, Us = {};
+function program(fsSrc) {
+  const sh = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+  gl.bindAttribLocation(p, 0, "p");
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+if (!gl) showToast("Этот браузер не поддерживает WebGL2. Откройте страницу в Chrome или Safari.", 600000);
+else {
+  depthProg = program(DEPTH_FS);
+  stereoProg = program(STEREO_FS);
+  for (const n of ["uRes", "uFocal"]) Ud[n] = gl.getUniformLocation(depthProg, n);
+  for (const n of ["uDepth", "uRes", "uPw", "uMu", "uDot", "uSeed", "uAnchor", "uSym", "uShowDepth"]) Us[n] = gl.getUniformLocation(stereoProg, n);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  depthTex = gl.createTexture();
+  fbo = gl.createFramebuffer();
+}
+
+// ---------- controls
+const ids = ["sep", "depth", "dot", "anchor", "symmetric", "showDepth"];
+const el = Object.fromEntries(ids.map(i => [i, document.getElementById(i)]));
+const KEY = "unfocus-v6";
+let seed = 1;
+function fitToScreen() {
+  // monitor: user's preferred 226 px; phones: ~1/3.6 of the short side
+  const short = Math.min(innerWidth, innerHeight);
+  el.sep.value = short >= 900 ? 226 : Math.round(Math.min(160, Math.max(70, short / 3.6)));
+}
+let saved = null;
+try { saved = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
+if (saved) { for (const k of ids) if (k in saved) { if (el[k].type === "checkbox") el[k].checked = saved[k]; else el[k].value = saved[k]; } }
+else fitToScreen();
+if (location.hash === "#depth") el.showDepth.checked = true;
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(ids.map(k => [k, el[k].type === "checkbox" ? el[k].checked : el[k].value])))); } catch (e) {}
+}
+function labels() { for (const k of ids) { const v = document.getElementById("v_" + k); if (v) v.textContent = el[k].value; } }
+for (const k of ids) for (const ev of ["input", "change"]) el[k].addEventListener(ev, () => { labels(); save(); requestDraw(false); });
+labels();
+
+document.addEventListener("focusin", e => {
+  document.querySelectorAll(".ctl.focused").forEach(n => n.classList.remove("focused"));
+  const c = e.target.closest(".ctl"); if (c) c.classList.add("focused");
+});
+function describe(t) {
+  const c = t.closest(".ctl"); const lab = c && (c.querySelector("label") || c.querySelector("span"));
+  const name = lab ? lab.childNodes[0].textContent.trim() : t.id;
+  if (t.type === "checkbox") return `${name}: ${t.checked ? "вкл" : "выкл"}`;
+  if (t.tagName === "SELECT") return `${name}: ${t.options[t.selectedIndex].text}`;
+  return `${name}: ${t.value}`;
+}
+
+// ---------- rendering (only when something changes)
+let dpr = 1, depthDirty = true, pending = false;
+function requestDraw(newDepth) {
+  depthDirty = depthDirty || newDepth;
+  if (!pending) { pending = true; requestAnimationFrame(render); }
+}
+function render() {
+  pending = false;
+  if (!gl) return;
+  const W = canvas.width, H = canvas.height;
+  if (depthDirty) {
+    gl.bindTexture(gl.TEXTURE_2D, depthTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, depthTex, 0);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(depthProg);
+    // landscape: 75° horizontal view; portrait: narrower so the scene stays readable
+    const hfov = (W >= H ? 75 : 62) * Math.PI / 180;
+    gl.uniform2f(Ud.uRes, W, H);
+    gl.uniform1f(Ud.uFocal, 0.5 * W / Math.tan(hfov / 2));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    depthDirty = false;
+  }
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(stereoProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, depthTex);
+  gl.uniform1i(Us.uDepth, 0);
+  gl.uniform2f(Us.uRes, W, H);
+  gl.uniform1f(Us.uPw, parseFloat(el.sep.value) * dpr);
+  gl.uniform1f(Us.uMu, parseFloat(el.depth.value));
+  gl.uniform1f(Us.uDot, parseFloat(el.dot.value) * dpr);
+  gl.uniform1ui(Us.uSeed, seed);
+  gl.uniform1i(Us.uAnchor, el.anchor.value === "center" ? 1 : 0);
+  gl.uniform1i(Us.uSym, el.symmetric.checked ? 1 : 0);
+  gl.uniform1i(Us.uShowDepth, el.showDepth.checked ? 1 : 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr)), h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (w !== canvas.width || h !== canvas.height) { canvas.width = w; canvas.height = h; requestDraw(true); }
+}
+addEventListener("resize", resize);
+resize(); requestDraw(true);
+
+// ---------- sheet & buttons
+const sheet = document.getElementById("sheet");
+let hideTimer;
+function openSheet() { sheet.classList.remove("hidden"); armHide(); }
+function closeSheet() { sheet.classList.add("hidden"); clearTimeout(hideTimer); if (document.activeElement && sheet.contains(document.activeElement)) document.activeElement.blur(); }
+function armHide() { clearTimeout(hideTimer); hideTimer = setTimeout(closeSheet, 6000); }
+canvas.addEventListener("pointerup", () => sheet.classList.contains("hidden") ? openSheet() : closeSheet());
+for (const ev of ["pointerdown", "input", "scroll", "focusin"]) sheet.addEventListener(ev, armHide, true);
+document.getElementById("close").addEventListener("click", closeSheet);
+document.getElementById("reseed").addEventListener("click", () => { seed = (seed * 1103515245 + 12345) >>> 0 || 1; requestDraw(false); showToast("Новый узор"); });
+document.getElementById("fit").addEventListener("click", () => { fitToScreen(); labels(); save(); requestDraw(false); showToast(`Ширина узора: ${el.sep.value} px`); });
+function toggleFs() {
+  try {
+    const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(() => showToast("Полноэкранный режим здесь недоступен"));
+  } catch (e) { showToast("Полноэкранный режим здесь недоступен"); }
+}
+document.getElementById("fs").addEventListener("click", toggleFs);
+
+function stepControl(t, dir) {
+  if (t.type === "range") {
+    const s = parseFloat(t.step) || 1, dec = (String(t.step).split(".")[1] || "").length;
+    t.value = Math.min(parseFloat(t.max), Math.max(parseFloat(t.min), parseFloat(t.value) + dir * s)).toFixed(dec);
+  } else if (t.tagName === "SELECT") t.selectedIndex = Math.min(t.options.length - 1, Math.max(0, t.selectedIndex + dir));
+  else if (t.type === "checkbox") t.checked = dir > 0;
+  else return false;
+  t.dispatchEvent(new Event("input", { bubbles: true }));
+  showToast(describe(t));
+  return true;
+}
+addEventListener("keydown", e => {
+  const t = document.activeElement;
+  if (["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft"].includes(e.code)) {
+    if (t && sheet.contains(t) && stepControl(t, e.code === "ArrowUp" || e.code === "ArrowRight" ? 1 : -1)) { e.preventDefault(); armHide(); }
+    return;
+  }
+  if (e.code === "Tab") { if (sheet.classList.contains("hidden")) openSheet(); else armHide(); return; }
+  if (e.code === "Escape") { closeSheet(); return; }
+  if (e.code === "KeyF") toggleFs();
+}, true);
+
+showToast("Смотрите «сквозь» экран. Касание — настройки.", 4000);
+</script>
+
+</html>
