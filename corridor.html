@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Стереокоридор Unfocus</title>
+<title>Пульсирующий стереокоридор</title>
 <style>
   /* One-screen static stereogram; settings in a self-hiding bottom sheet. Single deliberate dark look. */
   :root {
@@ -57,19 +57,29 @@
 <div id="sheet" class="hidden">
   <div class="head"><h1>Стереокоридор</h1><button id="close" class="small" type="button">Скрыть</button></div>
   <div class="ctl"><label for="sep">Ширина узора, px <b id="v_sep"></b></label>
-    <input id="sep" type="range" min="60" max="300" step="1" value="226"></div>
+    <input id="sep" type="range" min="60" max="400" step="1" value="300"></div>
   <div class="ctl"><label for="depth">Сила глубины <b id="v_depth"></b></label>
     <input id="depth" type="range" min="0.05" max="0.5" step="0.01" value="0.5"></div>
   <div class="ctl"><label for="dot">Размер точки, px <b id="v_dot"></b></label>
     <input id="dot" type="range" min="1" max="4" step="1" value="1"></div>
+  <div class="ctl"><label for="pulseTo">Пульсация до, px <b id="v_pulseTo"></b></label>
+    <input id="pulseTo" type="range" min="60" max="400" step="1" value="250"></div>
+  <div class="ctl"><label for="pulseDown">Сужение, с <b id="v_pulseDown"></b></label>
+    <input id="pulseDown" type="range" min="0.1" max="3" step="0.1" value="0.7"></div>
+  <div class="ctl"><label for="pulseUp">Возврат, с <b id="v_pulseUp"></b></label>
+    <input id="pulseUp" type="range" min="0.1" max="3" step="0.1" value="1.3"></div>
+  <div class="ctl"><label for="pulseCount">Сколько раз <b id="v_pulseCount"></b></label>
+    <input id="pulseCount" type="range" min="0" max="10" step="1" value="1"></div>
   <div class="ctl"><label for="anchor">Старт узора</label>
     <select id="anchor"><option value="left">Слева</option><option value="center">От центра</option></select></div>
   <div class="ctl chk"><input id="symmetric" type="checkbox" checked><span>Симметричные пары</span></div>
   <div class="ctl chk"><input id="showDepth" type="checkbox"><span>Показать ответ (карту глубины)</span></div>
+  <div class="row"><button id="again" type="button">Пульсация ещё раз</button></div>
   <div class="row"><button id="reseed" type="button">Новый узор</button><button id="fit" type="button">Под этот экран</button></div>
   <div class="row"><button id="fs" type="button">Во весь экран</button></div>
   <p class="hint">Смотрите «сквозь» экран, будто вдаль, пока полосы не сольются. В глубине — коридор, рогатый монстр и стволы ружья у самых глаз. На телефоне лучше повернуть экран горизонтально.<br>
-  Касание — настройки. На компьютере: Tab — между настройками, стрелки — на один шаг.</p>
+  В начале ширина узора пару раз «дышит» и возвращается к исходной — это помогает глазам поймать объём.<br>
+  Касание — настройки. На компьютере: Tab — между настройками, стрелки — на один шаг, R — пульсация ещё раз.</p>
 </div>
 
 <script>
@@ -261,14 +271,16 @@ else {
 }
 
 // ---------- controls
-const ids = ["sep", "depth", "dot", "anchor", "symmetric", "showDepth"];
+const ids = ["sep", "depth", "dot", "pulseTo", "pulseDown", "pulseUp", "pulseCount", "anchor", "symmetric", "showDepth"];
 const el = Object.fromEntries(ids.map(i => [i, document.getElementById(i)]));
-const KEY = "unfocus-v6";
+const KEY = "unfocus-v8c";
 let seed = 1;
 function fitToScreen() {
-  // monitor: user's preferred 226 px; phones: ~1/3.6 of the short side
+  // monitor: 300 px, pulse down to 250; phones: ~1/3.6 of the short side, pulse scaled in the same 250/300 ratio
   const short = Math.min(innerWidth, innerHeight);
-  el.sep.value = short >= 900 ? 226 : Math.round(Math.min(160, Math.max(70, short / 3.6)));
+  const sep = short >= 900 ? 300 : Math.round(Math.min(160, Math.max(70, short / 3.6)));
+  el.sep.value = sep;
+  el.pulseTo.value = Math.round(sep * 250 / 300);
 }
 let saved = null;
 try { saved = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
@@ -327,7 +339,7 @@ function render() {
   gl.bindTexture(gl.TEXTURE_2D, depthTex);
   gl.uniform1i(Us.uDepth, 0);
   gl.uniform2f(Us.uRes, W, H);
-  gl.uniform1f(Us.uPw, parseFloat(el.sep.value) * dpr);
+  gl.uniform1f(Us.uPw, curSep * dpr);
   gl.uniform1f(Us.uMu, parseFloat(el.depth.value));
   gl.uniform1f(Us.uDot, parseFloat(el.dot.value) * dpr);
   gl.uniform1ui(Us.uSeed, seed);
@@ -342,7 +354,33 @@ function resize() {
   if (w !== canvas.width || h !== canvas.height) { canvas.width = w; canvas.height = h; requestDraw(true); }
 }
 addEventListener("resize", resize);
+
+// ---------- intro pulse: pattern width swings sep -> pulseTo -> sep, N times, and ends exactly where it started
+let curSep = parseFloat(el.sep.value), pulseStart = 0, pulsing = false;
+function startPulse() {
+  pulseStart = performance.now();
+  if (!pulsing) { pulsing = true; requestAnimationFrame(pulseTick); }
+}
+function pulseTick(now) {
+  const t = (now - pulseStart) / 1000;
+  const a = parseFloat(el.sep.value), b = parseFloat(el.pulseTo.value);
+  const down = parseFloat(el.pulseDown.value), up = parseFloat(el.pulseUp.value), n = parseInt(el.pulseCount.value);
+  const P = down + up, done = t >= n * P;
+  if (done) curSep = a;
+  else {
+    const c = t % P;                                    // smooth half-cosine on each leg
+    const k = c < down ? 0.5 - 0.5 * Math.cos(Math.PI * c / down)            // a -> b
+                       : 0.5 + 0.5 * Math.cos(Math.PI * (c - down) / up);    // b -> a
+    curSep = a + (b - a) * k;
+  }
+  render();
+  if (!done) requestAnimationFrame(pulseTick);
+  else pulsing = false;
+}
+el.sep.addEventListener("input", () => { if (!pulsing) curSep = parseFloat(el.sep.value); });
+
 resize(); requestDraw(true);
+startPulse();
 
 // ---------- sheet & buttons
 const sheet = document.getElementById("sheet");
@@ -353,8 +391,9 @@ function armHide() { clearTimeout(hideTimer); hideTimer = setTimeout(closeSheet,
 canvas.addEventListener("pointerup", () => sheet.classList.contains("hidden") ? openSheet() : closeSheet());
 for (const ev of ["pointerdown", "input", "scroll", "focusin"]) sheet.addEventListener(ev, armHide, true);
 document.getElementById("close").addEventListener("click", closeSheet);
+document.getElementById("again").addEventListener("click", () => { startPulse(); showToast("Пульсация"); });
 document.getElementById("reseed").addEventListener("click", () => { seed = (seed * 1103515245 + 12345) >>> 0 || 1; requestDraw(false); showToast("Новый узор"); });
-document.getElementById("fit").addEventListener("click", () => { fitToScreen(); labels(); save(); requestDraw(false); showToast(`Ширина узора: ${el.sep.value} px`); });
+document.getElementById("fit").addEventListener("click", () => { fitToScreen(); if (!pulsing) curSep = parseFloat(el.sep.value); labels(); save(); requestDraw(false); showToast(`Ширина узора: ${el.sep.value} px`); });
 function toggleFs() {
   try {
     const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
@@ -383,6 +422,7 @@ addEventListener("keydown", e => {
   if (e.code === "Tab") { if (sheet.classList.contains("hidden")) openSheet(); else armHide(); return; }
   if (e.code === "Escape") { closeSheet(); return; }
   if (e.code === "KeyF") toggleFs();
+  else if (e.code === "KeyR") startPulse();
 }, true);
 
 showToast("Смотрите «сквозь» экран. Касание — настройки.", 4000);
