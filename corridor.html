@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Пульсирующий стереокоридор</title>
+<title>Монстр в стереокоридоре</title>
 <style>
   /* One-screen static stereogram; settings in a self-hiding bottom sheet. Single deliberate dark look. */
   :root {
@@ -56,6 +56,9 @@
 
 <div id="sheet" class="hidden">
   <div class="head"><h1>Стереокоридор</h1><button id="close" class="small" type="button">Скрыть</button></div>
+  <div class="ctl"><label for="monZ">Монстр: расстояние, м <b id="v_monZ"></b></label>
+    <input id="monZ" type="range" min="5.5" max="25" step="0.1" value="6"></div>
+  <div class="row" style="margin-top:6px"><button id="walk" type="button">Пусть идёт</button></div>
   <div class="ctl"><label for="sep">Ширина узора, px <b id="v_sep"></b></label>
     <input id="sep" type="range" min="60" max="400" step="1" value="300"></div>
   <div class="ctl"><label for="depth">Сила глубины <b id="v_depth"></b></label>
@@ -79,7 +82,7 @@
   <div class="row"><button id="fs" type="button">Во весь экран</button></div>
   <p class="hint">Смотрите «сквозь» экран, будто вдаль, пока полосы не сольются. В глубине — коридор, рогатый монстр и стволы ружья у самых глаз. На телефоне лучше повернуть экран горизонтально.<br>
   В начале ширина узора пару раз «дышит» и возвращается к исходной — это помогает глазам поймать объём.<br>
-  Касание — настройки. На компьютере: Tab — между настройками, стрелки — на один шаг, R — пульсация ещё раз.</p>
+  Касание — настройки. На компьютере: Tab — между настройками, стрелки — на один шаг, R — пульсация ещё раз, W — монстр идёт.</p>
 </div>
 
 <script>
@@ -95,6 +98,7 @@ const DEPTH_FS = `#version 300 es
 precision highp float;
 uniform vec2 uRes;
 uniform float uFocal;
+uniform float uMonZ;        // monster distance, metres
 out vec4 o;
 const float NEAR = 0.45, FAR = 32.0, B = 1e6;
 const float FLOOR = -1.3, CEIL = 2.2, WALL = 2.4, END = 30.0;
@@ -154,7 +158,7 @@ void main() {
   plane(0, -1.7, vec3(-B, FLOOR, 10.0), vec3(B, FLOOR + 0.7, 10.7));
   plane(1, FLOOR + 0.7, vec3(-2.4, -B, 10.0), vec3(-1.7, B, 10.7));
   // original horned brute
-  float bx = 0.35, bz = 6.0;
+  float bx = 0.35, bz = uMonZ;
   ellipsoid(vec3(bx, -0.15, bz), vec3(0.75, 0.85, 0.55));
   ellipsoid(vec3(bx, -1.05, bz), vec3(0.55, 0.3, 0.45));
   ellipsoid(vec3(bx - 0.3, -1.25, bz - 0.1), vec3(0.22, 0.12, 0.3));
@@ -260,7 +264,7 @@ if (!gl) showToast("Этот браузер не поддерживает WebGL2
 else {
   depthProg = program(DEPTH_FS);
   stereoProg = program(STEREO_FS);
-  for (const n of ["uRes", "uFocal"]) Ud[n] = gl.getUniformLocation(depthProg, n);
+  for (const n of ["uRes", "uFocal", "uMonZ"]) Ud[n] = gl.getUniformLocation(depthProg, n);
   for (const n of ["uDepth", "uRes", "uPw", "uMu", "uDot", "uSeed", "uAnchor", "uSym", "uShowDepth"]) Us[n] = gl.getUniformLocation(stereoProg, n);
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -271,9 +275,9 @@ else {
 }
 
 // ---------- controls
-const ids = ["sep", "depth", "dot", "pulseTo", "pulseDown", "pulseUp", "pulseCount", "anchor", "symmetric", "showDepth"];
+const ids = ["monZ", "sep", "depth", "dot", "pulseTo", "pulseDown", "pulseUp", "pulseCount", "anchor", "symmetric", "showDepth"];
 const el = Object.fromEntries(ids.map(i => [i, document.getElementById(i)]));
-const KEY = "unfocus-v8c";
+const KEY = "unfocus-v10";
 let seed = 1;
 function fitToScreen() {
   // monitor: 300 px, pulse down to 250; phones: ~1/3.6 of the short side, pulse scaled in the same 250/300 ratio
@@ -329,6 +333,7 @@ function render() {
     const hfov = (W >= H ? 75 : 62) * Math.PI / 180;
     gl.uniform2f(Ud.uRes, W, H);
     gl.uniform1f(Ud.uFocal, 0.5 * W / Math.tan(hfov / 2));
+    gl.uniform1f(Ud.uMonZ, parseFloat(el.monZ.value));
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     depthDirty = false;
@@ -378,6 +383,29 @@ function pulseTick(now) {
   else pulsing = false;
 }
 el.sep.addEventListener("input", () => { if (!pulsing) curSep = parseFloat(el.sep.value); });
+// monster distance needs a new depth map
+el.monZ.addEventListener("input", () => { if (!walking) requestDraw(true); });
+
+// ---------- "let it walk": from the far door to the gun in a few seconds
+let walking = false, walkFrom = 0, walkStart = 0;
+const WALK_FAR = 24, WALK_NEAR = 5.5, WALK_SPEED = 3.0;   // metres per second
+const walkBtn = document.getElementById("walk");
+function startWalk() {
+  if (walking) { walking = false; walkBtn.textContent = "Пусть идёт"; return; }
+  walking = true; walkBtn.textContent = "Стоп";
+  walkFrom = parseFloat(el.monZ.value) <= WALK_NEAR + 0.05 ? WALK_FAR : parseFloat(el.monZ.value);
+  walkStart = performance.now();
+  requestAnimationFrame(walkTick);
+}
+function walkTick(now) {
+  if (!walking) return;
+  const z = Math.max(WALK_NEAR, walkFrom - WALK_SPEED * (now - walkStart) / 1000);
+  el.monZ.value = z.toFixed(1); labels();
+  depthDirty = true; render();
+  if (z > WALK_NEAR) requestAnimationFrame(walkTick);
+  else { walking = false; walkBtn.textContent = "Пусть идёт"; save(); }
+}
+walkBtn.addEventListener("click", startWalk);
 
 resize(); requestDraw(true);
 startPulse();
@@ -423,6 +451,7 @@ addEventListener("keydown", e => {
   if (e.code === "Escape") { closeSheet(); return; }
   if (e.code === "KeyF") toggleFs();
   else if (e.code === "KeyR") startPulse();
+  else if (e.code === "KeyW") startWalk();
 }, true);
 
 showToast("Смотрите «сквозь» экран. Касание — настройки.", 4000);
