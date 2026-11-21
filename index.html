@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Стереомяч Unfocus</title>
+<style>
+  /* One-screen live stereogram; controls live in a bottom sheet that hides itself. Single deliberate dark look. */
+  :root {
+    --ink: #0b0b0e;          /* page ground behind the canvas */
+    --sheet: rgba(18, 18, 24, .9);
+    --line: #34343f;
+    --text: #ececf1;
+    --muted: #a0a0ad;
+    --accent: #8fb8ff;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--ink); color: var(--text); font: 14px/1.35 var(--font); }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; touch-action: none; }
+
+  #sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    max-height: 62vh; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--sheet); backdrop-filter: blur(8px); border-top: 1px solid var(--line);
+    border-radius: 14px 14px 0 0;
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+    transition: transform .3s ease, opacity .3s ease;
+  }
+  #sheet.hidden { transform: translateY(105%); opacity: 0; pointer-events: none; }
+  @media (min-width: 700px) { #sheet { left: 12px; right: auto; bottom: 12px; width: 320px; border-radius: 12px; border: 1px solid var(--line); } }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 2px 16px; }
+  @media (min-width: 520px) and (max-width: 699px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .ctl { min-width: 0; }
+  label { display: flex; justify-content: space-between; margin: 8px 0 2px; color: var(--muted); }
+  label b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; margin: 0; }
+  select, button { width: 100%; background: #26262f; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 10px; font: inherit; }
+  button { cursor: pointer; }
+  button.small { width: auto; padding: 6px 12px; }
+  .chk { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); }
+  .chk input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+  .ctl.focused label, .ctl.focused > span { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 8px; margin-top: 12px; } .row button { flex: 1; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+
+  #toast {
+    position: fixed; z-index: 6; left: 50%; transform: translateX(-50%);
+    top: calc(12px + env(safe-area-inset-top, 0px)); max-width: calc(100vw - 32px);
+    padding: 8px 12px; border-radius: 10px; background: var(--sheet); color: var(--text); text-align: center;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  #toast.on { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { #sheet, #toast { transition: none; } }
+</style>
+
+<canvas id="c" aria-label="Стереограмма: прыгающий мяч"></canvas>
+<div id="toast" role="status"></div>
+
+<div id="sheet" class="hidden">
+  <div class="head">
+    <h1>Стереомяч</h1>
+    <button id="close" class="small" type="button">Скрыть</button>
+  </div>
+  <div class="grid">
+    <div class="ctl"><label for="sep">Ширина узора, px <b id="v_sep"></b></label>
+      <input id="sep" type="range" min="60" max="240" step="1" value="110"></div>
+    <div class="ctl"><label for="depth">Сила глубины <b id="v_depth"></b></label>
+      <input id="depth" type="range" min="0.05" max="0.5" step="0.01" value="0.5"></div>
+    <div class="ctl"><label for="size">Размер мяча <b id="v_size"></b></label>
+      <input id="size" type="range" min="0.06" max="0.3" step="0.01" value="0.16"></div>
+    <div class="ctl"><label for="jump">Высота прыжка <b id="v_jump"></b></label>
+      <input id="jump" type="range" min="0" max="0.5" step="0.01" value="0.25"></div>
+    <div class="ctl"><label for="speed">Прыжков в секунду <b id="v_speed"></b></label>
+      <input id="speed" type="range" min="0.1" max="1.5" step="0.05" value="0.5"></div>
+    <div class="ctl"><label for="dot">Размер точки, px <b id="v_dot"></b></label>
+      <input id="dot" type="range" min="1" max="4" step="1" value="1"></div>
+    <div class="ctl"><label for="patternMode">Узор</label>
+      <select id="patternMode">
+        <option value="static">Статичный</option>
+        <option value="every">Обновлять каждый кадр</option>
+        <option value="interval">Обновлять раз в N кадров</option>
+      </select></div>
+    <div class="ctl"><label for="interval">N кадров <b id="v_interval"></b></label>
+      <input id="interval" type="range" min="2" max="120" step="1" value="12"></div>
+    <div class="ctl"><label for="anchor">Старт узора</label>
+      <select id="anchor">
+        <option value="left">Слева</option>
+        <option value="center">От центра</option>
+      </select></div>
+    <div class="ctl chk"><input id="symmetric" type="checkbox" checked><span>Симметричные пары</span></div>
+    <div class="ctl chk"><input id="showDepth" type="checkbox"><span>Показать ответ (карту глубины)</span></div>
+  </div>
+  <div class="row"><button id="play" type="button">Пауза</button><button id="fit" type="button">Под этот экран</button></div>
+  <div class="row"><button id="fs" type="button">Во весь экран</button></div>
+  <p class="hint">Как смотреть: держите телефон в 30–40 см и смотрите «сквозь» экран, будто вдаль, пока полосы узора не сольются и не проступит мяч.<br>
+  Касание экрана — настройки. На компьютере: пробел — пауза, Tab — между настройками, стрелки — на один шаг.</p>
+</div>
+
+<script>
+"use strict";
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl2", { antialias: false });
+
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }`;
+const fs = `#version 300 es
+precision highp float; precision highp int;
+uniform vec2 uRes;
+uniform vec3 uBall;
+uniform float uPw, uMu, uDot;
+uniform uint uSeed;
+uniform int uAnchor, uSym, uShowDepth;
+out vec4 o;
+const float Z_BASE = 0.33, Z_HEIGHT = 0.17;
+float depthAt(float x, float y) {
+  vec2 d = (vec2(x, y) - uBall.xy) / uBall.z;
+  float r2 = dot(d, d);
+  return r2 < 1.0 ? Z_BASE + Z_HEIGHT * sqrt(1.0 - r2) : 0.0;
+}
+float sepOf(float z) { float E = 2.0 * uPw; return E * (1.0 - uMu * z) / (2.0 - uMu * z); }
+float leftOf(float x, float y) {
+  float L = x - sepOf(depthAt(x, y));
+  if (uSym == 1) for (int i = 0; i < 4; i++) L = x - sepOf(depthAt(0.5 * (x + L), y));
+  return L;
+}
+float rightOf(float x, float y) {
+  float R = x + sepOf(depthAt(x, y));
+  if (uSym == 1) for (int i = 0; i < 4; i++) R = x + sepOf(depthAt(0.5 * (x + R), y));
+  return R;
+}
+uint hash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+vec3 dotColour(float u, float y) {
+  uint ix = uint(floor(u / uDot)), iy = uint(floor(y / uDot));
+  uint h = hash(ix * 1973u + hash(iy * 9277u + uSeed * 26699u));
+  return vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0;
+}
+void main() {
+  float x = gl_FragCoord.x - 0.5;
+  float y = uRes.y - gl_FragCoord.y - 0.5;
+  if (uShowDepth == 1) { o = vec4(vec3(depthAt(x, y)), 1.0); return; }
+  float A = uAnchor == 0 ? 0.0 : floor(0.5 * uRes.x - 0.5 * uPw);
+  for (int i = 0; i < 300; i++) {
+    if (x < A) { x = rightOf(x, y); continue; }
+    float L = leftOf(x, y);
+    if (L < A) break;
+    x = L;
+  }
+  o = vec4(dotColour(x - A, y), 1.0);
+}`;
+
+const toast = document.getElementById("toast");
+let toastTimer;
+function showToast(text, ms = 1300) {
+  toast.textContent = text; toast.classList.add("on");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove("on"), ms);
+}
+
+let U = {};
+if (!gl) {
+  showToast("Этот браузер не поддерживает WebGL2. Откройте страницу в Chrome или Safari.", 600000);
+} else {
+  const compile = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ["uRes", "uBall", "uPw", "uMu", "uDot", "uSeed", "uAnchor", "uSym", "uShowDepth"])
+    U[n] = gl.getUniformLocation(prog, n);
+}
+
+// ---------- controls (remembered per browser)
+const ids = ["sep", "depth", "size", "jump", "speed", "dot", "patternMode", "interval", "anchor", "symmetric", "showDepth"];
+const el = Object.fromEntries(ids.map(i => [i, document.getElementById(i)]));
+const KEY = "unfocus-v5";
+function fitToScreen() {
+  // pattern ≈ 1/3.6 of the short side (≈1.7 cm on a phone): small enough for relaxed eyes at 30–40 cm
+  const short = Math.min(innerWidth, innerHeight);
+  el.sep.value = Math.round(Math.min(160, Math.max(70, short / 3.6)));
+  el.size.value = "0.16";
+}
+let saved = null;
+try { saved = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
+if (saved) { for (const k of ids) if (k in saved) { if (el[k].type === "checkbox") el[k].checked = saved[k]; else el[k].value = saved[k]; } }
+else fitToScreen();
+if (location.hash === "#depth") el.showDepth.checked = true;
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(ids.map(k => [k, el[k].type === "checkbox" ? el[k].checked : el[k].value])))); } catch (e) {}
+}
+function labels() { for (const k of ids) { const v = document.getElementById("v_" + k); if (v) v.textContent = el[k].value; } }
+for (const k of ids) for (const ev of ["input", "change"]) el[k].addEventListener(ev, () => { labels(); save(); });
+labels();
+
+document.addEventListener("focusin", e => {
+  document.querySelectorAll(".ctl.focused").forEach(n => n.classList.remove("focused"));
+  const c = e.target.closest(".ctl"); if (c) c.classList.add("focused");
+});
+function describe(t) {
+  const c = t.closest(".ctl"); const lab = c && (c.querySelector("label") || c.querySelector("span"));
+  const name = lab ? lab.childNodes[0].textContent.trim() : t.id;
+  if (t.type === "checkbox") return `${name}: ${t.checked ? "вкл" : "выкл"}`;
+  if (t.tagName === "SELECT") return `${name}: ${t.options[t.selectedIndex].text}`;
+  return `${name}: ${t.value}`;
+}
+
+// ---------- canvas at exact device pixels
+let dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (gl) gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener("resize", resize); resize();
+
+// ---------- sheet: tap to open, hides itself after a pause
+const sheet = document.getElementById("sheet");
+let hideTimer;
+function openSheet() { sheet.classList.remove("hidden"); armHide(); }
+function closeSheet() { sheet.classList.add("hidden"); clearTimeout(hideTimer); if (document.activeElement && sheet.contains(document.activeElement)) document.activeElement.blur(); }
+function armHide() { clearTimeout(hideTimer); hideTimer = setTimeout(closeSheet, 6000); }
+canvas.addEventListener("pointerup", () => sheet.classList.contains("hidden") ? openSheet() : closeSheet());
+for (const ev of ["pointerdown", "input", "scroll", "focusin"]) sheet.addEventListener(ev, armHide, true);
+document.getElementById("close").addEventListener("click", closeSheet);
+addEventListener("mousemove", e => { if (e.movementX || e.movementY) { if (!sheet.classList.contains("hidden")) armHide(); } });
+
+// ---------- playback
+let playing = true, phase = 0, last = performance.now(), holdUntil = last + 2500, frame = 0, seed = 1;
+const playBtn = document.getElementById("play");
+function togglePlay() { playing = !playing; playBtn.textContent = playing ? "Пауза" : "Пуск"; showToast(playing ? "▶ Пуск" : "❚❚ Пауза"); }
+playBtn.addEventListener("click", togglePlay);
+document.getElementById("fit").addEventListener("click", () => { fitToScreen(); labels(); save(); showToast(`Ширина узора: ${el.sep.value} px`); });
+const fsBtn = document.getElementById("fs");
+function toggleFs() {
+  try {
+    const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(() => showToast("Полноэкранный режим здесь недоступен"));
+  } catch (e) { showToast("Полноэкранный режим здесь недоступен"); }
+}
+fsBtn.addEventListener("click", toggleFs);
+
+// keyboard (desktop): Space always pauses, arrows step the focused control by one unit
+function stepControl(t, dir) {
+  if (t.type === "range") {
+    const s = parseFloat(t.step) || 1, dec = (String(t.step).split(".")[1] || "").length;
+    t.value = Math.min(parseFloat(t.max), Math.max(parseFloat(t.min), parseFloat(t.value) + dir * s)).toFixed(dec);
+  } else if (t.tagName === "SELECT") t.selectedIndex = Math.min(t.options.length - 1, Math.max(0, t.selectedIndex + dir));
+  else if (t.type === "checkbox") t.checked = dir > 0;
+  else return false;
+  t.dispatchEvent(new Event("input", { bubbles: true }));
+  showToast(describe(t));
+  return true;
+}
+addEventListener("keydown", e => {
+  const t = document.activeElement;
+  if (e.code === "Space") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) togglePlay(); return; }
+  if (["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft"].includes(e.code)) {
+    if (t && sheet.contains(t) && stepControl(t, e.code === "ArrowUp" || e.code === "ArrowRight" ? 1 : -1)) { e.preventDefault(); armHide(); }
+    return;
+  }
+  if (e.code === "Tab") { if (sheet.classList.contains("hidden")) openSheet(); else armHide(); return; }
+  if (e.code === "Escape") { closeSheet(); return; }
+  if (e.code === "KeyF") toggleFs();
+}, true);
+addEventListener("keyup", e => { if (e.code === "Space") { e.preventDefault(); e.stopPropagation(); } }, true);
+
+// keep the screen awake while watching (ignored where not allowed)
+let wakeLock = null;
+async function keepAwake() { try { if ("wakeLock" in navigator && document.visibilityState === "visible") wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {} }
+document.addEventListener("visibilitychange", keepAwake); keepAwake();
+
+// ---------- render loop
+function draw(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (playing && now > holdUntil) phase = (phase + dt * parseFloat(el.speed.value)) % 1;
+  frame++;
+  const mode = el.patternMode.value;
+  if (mode === "every" || (mode === "interval" && frame % parseInt(el.interval.value) === 0)) seed = (seed + 1) >>> 0;
+  if (mode === "static") seed = 1;
+
+  const W = canvas.width, H = canvas.height;
+  const R = parseFloat(el.size.value) * Math.min(W, H);
+  const lift = 4 * phase * (1 - phase);                 // parabola: floor -> top -> floor
+  const floorY = H * 0.5 + parseFloat(el.jump.value) * H * 0.5;
+  const cy = Math.min(H - R, floorY) - lift * parseFloat(el.jump.value) * H;
+
+  if (gl) {
+    gl.uniform2f(U.uRes, W, H);
+    gl.uniform3f(U.uBall, W / 2, cy, R);
+    gl.uniform1f(U.uPw, parseFloat(el.sep.value) * dpr);
+    gl.uniform1f(U.uMu, parseFloat(el.depth.value));
+    gl.uniform1f(U.uDot, parseFloat(el.dot.value) * dpr);
+    gl.uniform1ui(U.uSeed, seed);
+    gl.uniform1i(U.uAnchor, el.anchor.value === "center" ? 1 : 0);
+    gl.uniform1i(U.uSym, el.symmetric.checked ? 1 : 0);
+    gl.uniform1i(U.uShowDepth, el.showDepth.checked ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+showToast("Смотрите «сквозь» экран. Касание — настройки.", 4000);
+</script>
+
+</html>
